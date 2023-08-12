@@ -1,0 +1,138 @@
+Build links:
+---
+https://github.com/eclipse-openj9/openj9/blob/master/doc/build-instructions/Build_Instructions_V17.md#linux
+
+bash get_source.sh -openj9-branch=v0.36.0-release -omr-branch=v0.36.0-release
+-openj9-repo=https://github.com/Pilipets/openj9  
+
+
+https://github.com/ibmruntimes/openj9-openjdk-jdk17
+https://github.com/eclipse-openj9/openj9
+https://github.com/eclipse/omr
+
+https://askubuntu.com/questions/1406962/install-gcc7-on-ubuntu-22-04
+
+
+--- Summmary ---
+A lot of things go through J9ReadBarrier
+
+1. Starting from top lever interpreter that is a huge stack machine
+---
+	/* ... => ..., <1 or 2 slot value> */
+	aload0getfield(REGISTER_ARGS_LIST)
+
+	/* ..., objectref => ..., <1 or 2 slot value> */
+	getfield(REGISTER_ARGS_LIST)
+---
+	VMINLINE VM_BytecodeAction
+	getfieldLogic(REGISTER_ARGS_LIST, UDATA indexOffset, j9object_t *objectLocation, UDATA slotsToPop)
+	{
+							newObjectRef = _objectAccessBarrier.inlineMixedObjectReadObject(_currentThread, objectref, newValueOffset, isVolatile);
+---
+
+
+2. Alternative flow through unsafe that ends up in VM
+---
+    JUMP_TARGET(J9_BCLOOP_SEND_TARGET_INL_UNSAFE_GETOBJECT):
+        PERFORM_ACTION(inlUnsafeGetObject(REGISTER_ARGS, false));
+---
+	/* sun.misc.Unsafe: public native Object getObject(Object obj, long offset); */
+	/* sun.misc.Unsafe: public native Object getObjectVolatile(Object obj, long offset); */
+	VMINLINE VM_BytecodeAction
+	inlUnsafeGetObject(REGISTER_ARGS_LIST, bool isVolatile)
+	{
+...
+		j9object_t value = VM_UnsafeAPI::getObject(_currentThread, &_objectAccessBarrier, obj, offset, isVolatile);
+---
+	getObject(J9VMThread *currentThread, MM_ObjectAccessBarrierAPI *objectAccessBarrier, j9object_t object, UDATA offset, bool isVolatile)
+	{
+			value = objectAccessBarrier->inlineMixedObjectReadObject(currentThread, object, offset, isVolatile);
+---
+
+
+Let's now check the logic for inlineMixedObjectReadObject
+---
+	inlineMixedObjectReadObject(J9VMThread *vmThread, j9object_t srcObject, UDATA srcOffset, bool isVolatile = false)
+	{
+#if defined(J9VM_GC_ALWAYS_CALL_OBJECT_ACCESS_BARRIER) # this isn't executed by default
+		return vmThread->javaVM->memoryManagerFunctions->j9gc_objaccess_mixedObjectReadObject(vmThread, srcObject, srcOffset, isVolatile);
+#elif defined(J9VM_GC_COMBINATION_SPEC)
+		fj9object_t *actualAddress = J9OAB_MIXEDOBJECT_EA(srcObject, srcOffset, fj9object_t);
+		
+		preMixedObjectReadObject(vmThread, srcObject, actualAddress);
+---
+--- Two flows here are available ---
+---
+j9gc_objaccess_mixedObjectReadObject(J9VMThread *vmThread, J9Object *srcObject, UDATA offset, UDATA isVolatile) { # this isn't executed by default
+	MM_ObjectAccessBarrier *barrier = MM_GCExtensions::getExtensions(vmThread)->accessBarrier;
+	return barrier->mixedObjectReadObject(vmThread, srcObject, offset, 0 != isVolatile);
+}
+---
+MM_ObjectAccessBarrier::mixedObjectReadObject(J9VMThread *vmThread, J9Object *srcObject, UDATA srcOffset, bool isVolatile)
+{
+	if (preObjectRead(vmThread, srcObject, actualAddress)) {
+--- Or ---
+preMixedObjectReadObject -> internalPreReadObject
+---
+		if (j9gc_modron_readbar_none != _readBarrierType) {
+			vmThread->javaVM->memoryManagerFunctions->J9ReadBarrier(vmThread, srcAddress); # this isn't executed by default
+		}
+---
+void
+J9ReadBarrier(J9VMThread *vmThread, fj9object_t *srcAddress)
+{
+	MM_ObjectAccessBarrier *barrier = MM_GCExtensions::getExtensions(vmThread->javaVM)->accessBarrier;
+	barrier->preObjectRead(vmThread, NULL, srcAddress);
+}
+---
+
+
+3. Third flow starting from getReferenceFieldAtAddress
+---
+uintptr_t
+TR_J9VMBase::getReferenceFieldAtAddress(uintptr_t fieldAddress)
+   {
+   TR_ASSERT(haveAccess(), "Must haveAccess in getReferenceFieldAtAddress");
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+   // Emit read barrier
+   if (TR::Compiler->om.readBarrierType() != gc_modron_readbar_none)
+      vmThread()->javaVM->javaVM->memoryManagerFunctions->J9ReadBarrier(vmThread(), (fj9object_t *)fieldAddress);
+#endif
+---
+[JITClientCompilationThread.cpp] - case MessageType::KnownObjectTable_dereferenceKnownObjectField, case MessageType::VM_getReferenceFieldAtAddress
+[InterpreterEmulator.cpp] - InterpreterEmulator::maintainStackForGetField()
+[J9TransformUtil.cpp] - dereferenceStructPointerChain, transformIndirectLoadChainImpl
+[VPHandlers.cpp] - constrainIiload
+[J9ValuePropagation.cpp] - constrainRecognizedMethod
+---
+
+
+Other info
+---
+class MM_ObjectAccessBarrierAPI
+class MM_ObjectAccessBarrier : public MM_BaseVirtual
+
+_objectAccessBarrier.cloneObject(_currentThread, original, copy, objectClass);
+
+	/**
+	 * Returns whether or not the out of line GC access barrier code must be called.
+	 *
+	 * @param vm[in] the J9JavaVM
+	 *
+	 * @returns true if the call must be made, false if an inline path may be taken
+	 */
+	static VMINLINE bool
+	mustCallWriteAccessBarrier(J9JavaVM *vm)
+---
+
+	UDATA gcWriteBarrierType;
+	UDATA gcReadBarrierType;
+---
+
+
+What about Garbage collection?
+---
+
+mark.*sweep
+
+MM_MainGCThread::garbageCollect(MM_EnvironmentBase *env, MM_AllocateDescription *allocDescription)

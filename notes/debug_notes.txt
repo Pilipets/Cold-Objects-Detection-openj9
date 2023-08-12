@@ -1,0 +1,146 @@
+How to run debug build:
+
+
+---
+
+Debug indexable - inlineIndexableObjectStoreObject, inlineIndexableObjectReadObject
+
+---
+
+Find log files
+find /tmp/  -maxdepth 1 -type f -size +100b -name 'file*' -exec ls -lth {} +
+
+---
+
+-----------------------------------------------------------------------
+https://github.com/AlexeyKhrabrov/jitserver-benchmarks/blob/main/scripts/openj9_build.sh
+
+~/research_jvm/scripts/openj9_build.sh ~ 17 -c -d
+
+cd ~/research_jvm/scripts
+./openj9_build.sh ~ 17 -c -d
+
+
+./configure --enable-ccache --enable-jitserver --with-cmake --with-boot-jdk="${jdk_dir}/bootjdk17" --with-conf-name=slowdebug --with-debug-level=slowdebug --with-native-debug-symbols=internal
+
+make CONF=slowdebug all
+-----------------------------------------------------------------------
+
+
+-Xgc:concurrentScavenge -Xgcpolicy:balanced
+
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/javac Main.java
+gdb --args -x gdb_script.txt ~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java -Xint Main
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/javap -c -l Main
+
+savitar@hpylypets:~/openj9-openjdk-jdk17$ gdb /home/savitar/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java /home/savitar/research_jvm/core.20230628.185929.341430.0001.dmp
+
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java -Xgcpolicy:optthruput -Xint -Xgc:dumpObjCountFreq=10 -jar renaissance-gpl-0.14.2.jar -r 2 finagle-http
+
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java -jar renaissance-gpl-0.14.2.jar log-regression
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java -Xgcpolicy:balanced -Xint -jar renaissance-gpl-0.14.2.jar finagle-http
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java -Xgcpolicy:balanced -jar renaissance-gpl-0.14.2.jar als finagle-http finagle-chirper scala-kmeans par-mnemonics reactors
+https://github.com/renaissance-benchmarks/renaissance
+
+~/openj9-openjdk-jdk17/build/slowdebug/jdk/bin/java Main.java
+
+	bool alwaysCallReadBarrier; /**< was -Xgc:alwaysCallReadBarrier specified? */
+    -Xgc:alwayscallwritebarrier
+
+    #if defined(J9VM_GC_ALWAYS_CALL_OBJECT_ACCESS_BARRIER)
+
+      36: getfield      #50                 // Field MainClass.innerClass:LInnerClass;
+
+---
+
+Benchmarks - https://github.com/renaissance-benchmarks/renaissance
+
+typedef struct J9Object {
+
+TR_J9VMBase::getJavaLangClassHashCode(TR::Compilation * comp, TR_OpaqueClassBlock * clazzPointer, bool &hashCodeComputed)
+
+gmake[3]: Leaving directory '/home/savitar/openj9-openjdk-jdk17/make'
+Assertion failed at ../../../../../openj9/runtime/compiler/x/codegen/J9TreeEvaluator.cpp:7950: (fej9->getOffsetOfDiscontiguousDataAddrField() - fej9->getOffsetOfContiguousDataAddrField()) == 8
+VMState: 0x0005ff04
+	Node 0x7fdd31704df0 [anewarray]: Offset of dataAddr field in discontiguous array is expected to be 8 bytes more than contiguous array. But was 16 bytes for discontigous and 16 bytes for contiguous array.
+
+
+---
+What paths are executed for read/write?
+
+If one uses J9VM_GC_ALWAYS_CALL_OBJECT_ACCESS_BARRIER, then it's object access barriers for all types - both primitive and objects
+If -Xgc:alwaysCallReadBarrier, then for objects it goes through the J9ReadBarrier(preObjectRead)
+
+Similarly, for write logic - inlineMixedObjectStoreObject vs inlineMixedObjectReadObject
+
+---
+break locspec thread thread-id
+
+inside getField
+b /home/savitar/openj9-openjdk-jdk17/openj9/runtime/vm/BytecodeInterpreter.hpp:7222 thread 2
+
+inside inlineMixedObjectReadObject
+b /home/savitar/openj9-openjdk-jdk17/openj9/runtime/gc_include/ObjectAccessBarrierAPI.hpp:486 thread 2
+
+
+
+(gdb) print J9UTF8_DATA(J9ROMMETHOD_NAME(J9_ROM_METHOD_FROM_RAM_METHOD(_literals)))
+$4 = 0x7fffe42d7eb4 "main\t"
+(gdb) print J9UTF8_DATA(J9ROMMETHOD_SIGNATURE(J9_ROM_METHOD_FROM_RAM_METHOD(_literals)))
+$5 = 0x7ffff0302886 "([Ljava/lang/String;)V\t"
+(gdb) print J9UTF8_DATA(J9ROMCLASS_CLASSNAME(J9_CLASS_FROM_METHOD(_literals)->romClass))
+$6 = 0x7ffff0302754 "Main\022"
+(gdb) print (size_t)_pc - (size_t)_literals->bytecodes
+$8 = 36
+(gdb) 
+
+---
+
+(gdb) print J9_ROM_METHOD_FROM_RAM_METHOD(_literals)
+$2 = (J9ROMMethod *) 0x7ffff030264c
+(gdb) print J9ROMMETHOD_NAME(J9_ROM_METHOD_FROM_RAM_METHOD(_literals))
+$3 = (J9UTF8 *) 0x7fffe42d7eb2
+
+(gdb) print _pc
+$7 = (U_8 *&) <synthetic pointer>: 0x7ffff0302684 "\264\021"
+
+
+#if defined(LOCAL_LITERALS)
+#define LITERALS J9Method * &_literals
+#define LITERALS_PARAM _literals
+#endif
+
+J9Method->J9ConstantPool::constantPool->J9Class::ramClass->J9ROMClass::romClass
+
+
+
+Results
+---
+
+getField, putField for non-static - for both primitive and objects
+getStatic, to get the actual static object putStatic 
+
+static MainClass mainClass = new MainClass();
+if mainClass is static
+      27: getstatic     #103                // Field mainClass:LMainClass;
+      30: getfield      #47                 // Field MainClass.innerClass:LInnerClass;
+
+---
+many false positives because of non-user created types
+
+(gdb) frame 1
+#1  0x00007ffff78938e1 in VM_BytecodeInterpreterCompressed::getfieldLogic (this=this@entry=0x7ffff7f5e750, _sp=@0x7ffff7f5e700: 0xf1560, _pc=@0x7ffff7f5e708: 0x7fffe436a338 "״\020", indexOffset=indexOffset@entry=2, objectLocation=0xf15b8, slotsToPop=slotsToPop@entry=0)
+    at ../../../../../openj9/runtime/vm/BytecodeInterpreter.hpp:7222
+7222								newObjectRef = _objectAccessBarrier.inlineMixedObjectReadObject(_currentThread, objectref, newValueOffset, isVolatile);
+(gdb) print J9UTF8_DATA(J9ROMMETHOD_SIGNATURE(J9_ROM_METHOD_FROM_RAM_METHOD(_literals)))
+$8 = 0x7fffe4334a06 "(Ljava/lang/String;II)V"
+(gdb) print J9UTF8_DATA(J9ROMCLASS_CLASSNAME(J9_CLASS_FROM_METHOD(_literals)->romClass))
+$9 = 0x7fffe433b930 "java/io/BufferedWriter\a"
+(gdb) print J9UTF8_DATA(J9ROMMETHOD_NAME(J9_ROM_METHOD_FROM_RAM_METHOD(_literals)))
+$10 = 0x7fffe429438c "write"
+(gdb) 
+
+Thread 2 "main" hit Breakpoint 5, VM_BytecodeInterpreterCompressed::getfieldLogic (this=this@entry=0x7ffff7f5e750, _sp=@0x7ffff7f5e700: 0xf15e8, _pc=@0x7ffff7f5e708: 0x7fffe434eef8 "״\032", indexOffset=indexOffset@entry=2, objectLocation=0xf1618, slotsToPop=slotsToPop@entry=0) at ../../../../../openj9/runtime/vm/BytecodeInterpreter.hpp:7222
+7222								newObjectRef = _objectAccessBarrier.inlineMixedObjectReadObject(_currentThread, objectref, newValueOffset, isVolatile);
+(gdb) print J9UTF8_DATA(J9ROMCLASS_CLASSNAME(J9_CLASS_FROM_METHOD(_literals)->romClass))
+$19 = 0x7fffe4267312 "java/io/PrintStream"

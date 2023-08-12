@@ -1,0 +1,214 @@
+Implementation plan:
+
+---
+Initialize access counters with 0 at bytecodeInterpreter newLogic - grep for the (// we set to zero access counters, accessCount)
+increment on every object access
+figure out where to read access counters - safe point, GC cycles(mark phase)
+
+write an app that forces GC and prints acess counters
+
+---
+Dump object sizes
+
+	MMINLINE uintptr_t
+	calculateObjectSizeAndHashcode(MM_ForwardedHeader *forwardedHeader, uintptr_t *hashcodeOffset)
+	{
+		J9Class* clazz = getPreservedClass(forwardedHeader);
+		uintptr_t numberOfElements = (uintptr_t)getPreservedIndexableSize(forwardedHeader);
+		uintptr_t dataSizeInBytes = getDataSizeInBytes(clazz, numberOfElements);
+		ArrayLayout layout = getArrayletLayout(clazz, dataSizeInBytes);
+		*hashcodeOffset = getHashcodeOffset(clazz, layout, numberOfElements);
+		return getSizeInBytesWithHeader(clazz, layout, numberOfElements);
+	}
+
+		MMINLINE uintptr_t
+	getHeaderSize(J9IndexableObject *arrayPtr)
+
+
+UDATA const objectHeaderSize = J9JAVAVM_OBJECT_HEADER_SIZE(_VirtualMachine);
+
+			if (J9CLASS_IS_ARRAY(receiverClass)) {
+				I_64 arrayDataSize = J9INDEXABLEOBJECT_SIZE(_currentThread, receiver) * J9ARRAYCLASS_GET_STRIDE(receiverClass);
+				I_64 headerSize = J9VMTHREAD_CONTIGUOUS_HEADER_SIZE(_currentThread);
+				returnDoubleFromINL(REGISTER_ARGS, arrayDataSize + headerSize, 2);
+			} else {
+				I_64 headerSize = (I_64)J9VMTHREAD_OBJECT_HEADER_SIZE(_currentThread);
+				returnDoubleFromINL(REGISTER_ARGS, receiverClass->totalInstanceSize + headerSize, 2);
+			}
+---
+Starting with marking in optthruput
+
+inlineMarkObjectNoCheck to print the object pointer
+
+void
+MM_ParallelMarkTask::run(MM_EnvironmentBase *env)
+{
+	env->_workStack.prepareForWork(env, (MM_WorkPackets *)(_markingScheme->getWorkPackets()));
+
+	_markingScheme->markLiveObjectsInit(env, _initMarkMap);
+
+	switch (_action) {
+		case MARK_ALL:
+			_markingScheme->markLiveObjectsRoots(env, true);
+			_markingScheme->markLiveObjectsScan(env);
+			_markingScheme->markLiveObjectsComplete(env);
+			break;
+
+---
+tarokRegionMaxAge, tarokNurseryMaxAge
+/* Succeeded in forwarding the object - copy and adjust the age value */
+MM_CopyForwardScheme::copy
+MMINLINE bool
+MM_CopyForwardScheme::copyAndForward(MM_EnvironmentVLHGC *env, MM_AllocationContextTarok *reservingContext, volatile j9object_t* objectPtrIndirect, bool leafType)
+{
+	J9Object *originalObjectPtr = *objectPtrIndirect;
+	J9Object *objectPtr = originalObjectPtr;
+	bool success = true;
+
+	if((NULL != objectPtr) && isObjectInEvacuateMemory(objectPtr)) {
+
+
+MM_CopyForwardScheme::completeScan
+MM_CopyForwardDelegate uses MM_CopyForwardScheme that in turn uses MM_CopyForwardSchemeTask
+
+MM_CopyForwardScheme::copyForwardCollectionSet(MM_EnvironmentVLHGC *env)
+{
+	copyForwardPreProcess(env);
+
+	/* And perform the copy forward */
+	MM_CopyForwardSchemeTask copyForwardTask(env, _dispatcher, this, env->_cycleState);
+	_dispatcher->run(env, &copyForwardTask);
+
+	copyForwardPostProcess(env);
+}
+
+---
+
+It's tricky with statics because we don't have actual objects in the method - inlineStaticStoreObject
+With indexable, it crashes, as well - do we actually need it or will it be called again for indexed object
+we don't care about arrays, btw
+inlineIndexableObjectStoreObject, inlineIndexableObjectReadObject, loadFlattenableArrayElement
+
+TOO MUCH EFFORT FOR THE ARRAYS
+
+With indexable
+_ZN32VM_BytecodeInterpreterCompressed18invokevirtualLogicERPmRPhb+0x4a (0x00007F2D6E493FF8 [libj9vm29.so+0x93ff8])
+_ZN32VM_BytecodeInterpreterCompressed13invokevirtualERPmRPh+0xe (0x00007F2D6E494108 [libj9vm29.so+0x94108])
+_ZN32VM_BytecodeInterpreterCompressed3runEP10J9VMThread+0xfe4b (0x00007F2D6E4A6B05 [libj9vm29.so+0xa6b05])
+bytecodeLoopCompressed+0x25 (0x00007F2D6E485165 [libj9vm29.so+0x85165])
+ (0x00007F2D6E525742 [libj9vm29.so+0x125742])
+---------------------------------------
+
+
+Adding accessCount to object headers as uint64_t resolves aligmment issues but leads to crashes after
+
+---
+J9ObjectMonitor * 
+objectMonitorInflate(J9VMThread* vmStruct, j9object_t object, UDATA lock) 
+
+---
+object monitors
+
+	VMINLINE IDATA
+	enterObjectMonitor(REGISTER_ARGS_LIST, j9object_t obj)
+	{
+
+
+		state->lockOffset = lockwordNeeded;
+		if (LOCKWORD_NEEDED == state->lockOffset) {
+			extraHiddenFields = initJ9HiddenField(&state->hiddenLockwordField, NULL,
+					vm->hiddenLockwordFieldShape,
+					&state->lockOffset, extraHiddenFields);
+		}
+---
+fieldOffsetsStartDo(J9JavaVM *vm, J9ROMClass *romClass, J9Class *superClazz, J9ROMFieldOffsetWalkState *state, U_32 flags)
+
+---
+			/* initialize lockword, if present */
+			lockwordAddress = getLockwordAddress(vmThread, destObject);
+			if (NULL != lockwordAddress) {
+				j9objectmonitor_t lwValue = VM_ObjectMonitor::getInitialLockword(vmThread->javaVM, objectClass);
+				J9_STORE_LOCKWORD(vmThread, lockwordAddress, lwValue);
+			}
+---
+
+
+		VM_BytecodeAction rc = newLogic(REGISTER_ARGS, &newObject);
+
+---
+JVM_GC_Impl(void)
+---
+UDATA
+j9gc_modron_global_collect_with_overrides(J9VMThread *vmThread, U_32 gcCode)
+---
+
+MM_CopyForwardScheme::workThreadGarbageCollect
+MM_RootScanner::scanAllSlots(MM_EnvironmentBase *env)
+
+For optthruput
+---
+
+MM_ParallelMarkTask::run(MM_EnvironmentBase *env)
+---
+MM_ParallelGlobalGC::markAll
+#0  MM_ParallelGlobalGC::mainThreadGarbageCollect (this=0x7ffff0048480, env=0x7ffff004b018, allocDescription=0x0, initMarkMap=<optimized out>, rebuildMarkBits=<optimized out>) at ../../../../../../omr/gc/base/standard/ParallelGlobalGC.cpp:461
+#1  0x00007ffff6739f71 in MM_ParallelGlobalGC::internalGarbageCollect (this=<optimized out>, env=0x7ffff004b018, subSpace=<optimized out>, allocDescription=0x0) at ../../../../../../omr/gc/base/standard/ParallelGlobalGC.cpp:1234
+#2  0x00007ffff6706497 in MM_Collector::garbageCollect (this=0x7ffff0048480, env=0x7ffff004b018, callingSubSpace=0x7ffff00cde60, allocateDescription=0x0, gcCode=<optimized out>, objectAllocationInterface=0x0, baseSubSpace=0x0, context=0x0)
+    at ../../../../../../omr/gc/base/Collector.cpp:500
+#3  0x00007ffff671ddce in MM_MemorySubSpace::systemGarbageCollect (this=0x7ffff00cde60, env=0x7ffff004b018, gcCode=3) at ../../../../../../omr/gc/base/MemorySubSpace.cpp:934
+#4  0x00007ffff671dd34 in MM_MemorySubSpace::systemGarbageCollect (this=0x7ffff00cdad0, env=0x7ffff004b018, gcCode=3) at ../../../../../../omr/gc/base/MemorySubSpace.cpp:921
+#5  0x00007ffff671b847 in MM_MemorySpace::systemGarbageCollect (this=<optimized out>, env=<optimized out>, gcCode=<optimized out>) at ../../../../../../omr/gc/base/MemorySpace.cpp:400
+#6  0x00007ffff670b7e7 in MM_Heap::systemGarbageCollect (this=<optimized out>, env=<optimized out>, gcCode=<optimized out>) at ../../../../../../omr/gc/base/Heap.cpp:108
+#7  0x00007ffff662c69d in j9gc_modron_global_collect_with_overrides (vmThread=0x29400, gcCode=gcCode@entry=3) at ../../../../../openj9/runtime/gc_base/modronapi.cpp:92
+
+For balanced
+---
+#0  MM_IncrementalGenerationalGC::mainThreadGarbageCollect (this=0x7ffff004a540, envBase=0x7ffff007f6e8, allocDescription=0x0, initMarkMap=false, rebuildMarkBits=false) at ../../../../../openj9/runtime/gc_vlhgc/IncrementalGenerationalGC.cpp:354
+#1  0x00007ffff6714234 in MM_MainGCThread::garbageCollect (this=this@entry=0x7ffff004cb00, env=env@entry=0x7ffff007f6e8, allocDescription=allocDescription@entry=0x0) at ../../../../../../omr/gc/base/MainGCThread.cpp:307
+#2  0x00007ffff66777e0 in MM_IncrementalGenerationalGC::internalGarbageCollect (this=0x7ffff004a540, env=0x7ffff007f6e8, subSpace=<optimized out>, allocDescription=0x0) at ../../../../../openj9/runtime/gc_vlhgc/IncrementalGenerationalGC.cpp:536
+---
+#3  0x00007ffff6706497 in MM_Collector::garbageCollect (this=0x7ffff004a540, env=0x7ffff007f6e8, callingSubSpace=0x7ffff00de2d0, allocateDescription=0x0, gcCode=<optimized out>, objectAllocationInterface=0x0, baseSubSpace=0x0, context=0x0)
+    at ../../../../../../omr/gc/base/Collector.cpp:500
+#4  0x00007ffff671dbac in MM_MemorySubSpace::systemGarbageCollect (this=0x7ffff00de2d0, env=0x7ffff007f6e8, gcCode=3) at ../../../../../../omr/gc/base/MemorySubSpace.cpp:934
+#5  0x00007ffff671b625 in MM_MemorySpace::systemGarbageCollect (this=<optimized out>, env=<optimized out>, gcCode=<optimized out>) at ../../../../../../omr/gc/base/MemorySpace.cpp:400
+#6  0x00007ffff670b7e7 in MM_Heap::systemGarbageCollect (this=<optimized out>, env=<optimized out>, gcCode=<optimized out>) at ../../../../../../omr/gc/base/Heap.cpp:108
+#7  0x00007ffff662c69d in j9gc_modron_global_collect_with_overrides (vmThread=0x29400, gcCode=gcCode@entry=3) at ../../../../../openj9/runtime/gc_base/modronapi.cpp:92
+---
+	switch(env->_cycleState->_collectionType) {
+	case MM_CycleState::CT_PARTIAL_GARBAGE_COLLECTION:
+		runPartialGarbageCollect(env, allocDescription);
+		break;
+	case MM_CycleState::CT_GLOBAL_MARK_PHASE:
+		runGlobalMarkPhaseIncrement(env);
+		break;
+	case MM_CycleState::CT_GLOBAL_GARBAGE_COLLECTION:
+		runGlobalGarbageCollection(env, allocDescription);
+		break;
+
+
+For gencon
+---
+#0  MM_ParallelGlobalGC::mainThreadGarbageCollect (this=0x7ffff0048460, env=0x7ffff004b698, allocDescription=0x0, initMarkMap=true, rebuildMarkBits=false) at ../../../../../../omr/gc/base/standard/ParallelGlobalGC.cpp:423
+#1  0x00007ffff67b5677 in MM_ConcurrentGC::internalGarbageCollect (this=<optimized out>, env=0x7ffff004b698, subSpace=<optimized out>, allocDescription=<optimized out>) at ../../../../../../omr/gc/base/standard/ConcurrentGC.cpp:2069
+---
+#2  0x00007ffff6706497 in MM_Collector::garbageCollect (this=0x7ffff0048460, env=0x7ffff004b698, callingSubSpace=0x7ffff00e1400, allocateDescription=0x0, gcCode=<optimized out>, objectAllocationInterface=0x0, baseSubSpace=0x0, context=0x0)
+    at ../../../../../../omr/gc/base/Collector.cpp:500
+#3  0x00007ffff671dbac in MM_MemorySubSpace::systemGarbageCollect (this=0x7ffff00e1400, env=0x7ffff004b698, gcCode=3) at ../../../../../../omr/gc/base/MemorySubSpace.cpp:934
+#4  0x00007ffff671db12 in MM_MemorySubSpace::systemGarbageCollect (this=0x7ffff00ce4e0, env=0x7ffff004b698, gcCode=3) at ../../../../../../omr/gc/base/MemorySubSpace.cpp:921
+#5  0x00007ffff671db12 in MM_MemorySubSpace::systemGarbageCollect (this=0x7ffff00ce150, env=0x7ffff004b698, gcCode=3) at ../../../../../../omr/gc/base/MemorySubSpace.cpp:921
+#6  0x00007ffff671b625 in MM_MemorySpace::systemGarbageCollect (this=<optimized out>, env=<optimized out>, gcCode=<optimized out>) at ../../../../../../omr/gc/base/MemorySpace.cpp:400
+#7  0x00007ffff670b7e7 in MM_Heap::systemGarbageCollect (this=<optimized out>, env=<optimized out>, gcCode=<optimized out>) at ../../../../../../omr/gc/base/Heap.cpp:108
+#8  0x00007ffff662c69d in j9gc_modron_global_collect_with_overrides (vmThread=0x29400, gcCode=gcCode@entry=3) at ../../../../../openj9/runtime/gc_base/modronapi.cpp:92
+
+	/* Run a garbage collect */
+
+	/* Mark */	
+	markAll(env, initMarkMap);
+
+	_delegate.postMarkProcessing(env);
+	
+	sweep(env, allocDescription, rebuildMarkBits);
+
+
+---
+	_extensions->globalGCStats.gcCount += 1;
