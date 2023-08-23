@@ -209,9 +209,11 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
         plt.show()
 
     # Display the total number/size for each bin
-    text_output = "Total Number of Objects/Total Size for Each Bin %s:\n" % display_iteration
+    text_output = "Total stats for each Bin %s:\n" % display_iteration
+    text_output += f"Number of objects: ~{round(sum(total_object_counts)/1000, 2)} K\n"
+    text_output += f"Size of objects: ~{round(sum(total_sizes)/(1024*1024), 2)} Mb\n"
     for i in range(num_bins):
-        text_output += f"Bin {int(bin_edges[i])}-{int(bin_edges[i + 1])}: {total_object_counts[i]} objects, {int(total_sizes[i]/1024)} Kb\n"
+        text_output += f"Bin {int(bin_edges[i])}-{int(bin_edges[i + 1])}: {round(total_object_counts[i]/1000, 2)}K objects, {round(total_sizes[i]/1024)} Kb\n"
 
         
     if file:
@@ -353,15 +355,15 @@ def run_workflow(benchmark='sunflow', num=15, **kwargs):
             print('Iteration failed with', ex)
 
 
+def copy_produced_pdfs(benchmarks, outdir=)
 if __name__ == '__main__':
     # file = '/home/savitar/research_jvm/results/h2/run1/dump_filel4cjsR'
     # for snap in read_logs(file, last_n=2, verbose=True, generator=True, reversed=True):
     #     display_freq_bins(snap)
 
-    file = '/home/savitar/research_jvm/results/sunflow/run5/dump_fileo3CZLt'
+    # file = '/home/savitar/research_jvm/results/sunflow/run5/dump_fileo3CZLt'
     # process_store_dump(file, last_n=100, reversed=False)
     # print(count_number_of_dumps(file))
 
-    # run_iteration(benchmark='sunflow (copy)', iter=2, copy_files=False)
-    run_workflow(benchmark='h2', num=5, last_n=100, analyze_dumps=False)
-
+    # run_iteration(benchmark='sunflow', iter=0, copy_files=False)
+    run_workflow(benchmark='h2', num=5, last_n=100, copy_files=False)
