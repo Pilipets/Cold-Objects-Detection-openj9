@@ -443,4 +443,4 @@ if __name__ == '__main__':
     # print(count_number_of_dumps(file))
 
     # run_iteration(benchmark='sunflow', iter=0, copy_files=False)
-    run_workflow(benchmark='h2', num=2, last_n=100, dump_period=10)
+    run_workflow(benchmark='h2', num=4, dump_period=5)
