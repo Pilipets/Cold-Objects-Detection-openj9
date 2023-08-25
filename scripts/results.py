@@ -2,20 +2,23 @@
 
 import datetime
 import os
+import sys
 
 class ObjectCnt:
     def __init__(self, **kwargs) -> None:
+        self.age = 0
         self.__dict__.update(kwargs)
 
     def __repr__(self):
-        return "ObjectCnt(thread=%d, cls=%s, ptr='%s', cnt=%d, %s, size=%d, typ='%s')" % (
+        return "ObjectCnt(thread=%d, cls=%s, ptr='%s', cnt=%d, %s, size=%d, typ='%s', age=%d)" % (
             self.thread,
             self.cls,
             self.ptr,
             self.cnt,
             '' if self.length is None else ('length=%d' % self.length),
             self.size,
-            self.typ
+            self.typ,
+            self.age
         )
 
 
@@ -77,7 +80,8 @@ def count_number_of_dumps(logfile):
 
 
 def read_logs(logfile, last_n = None, verbose=False, reversed=False, generator=False):
-    if last_n is None: last_n = sys.maxint
+    print(locals())
+    if last_n is None: last_n = sys.maxsize
     snapshots = []
     cur_dict = set()
     snapshots_cnt = 0
@@ -115,11 +119,14 @@ def read_logs(logfile, last_n = None, verbose=False, reversed=False, generator=F
             elif th_str.startswith('My log obj:'): typ = 'object'
             else: assert False, ('unexpected log format for ' + th_str)
 
+            cnt = int(parts[3][len('cnt='):])
+            cnt, age = (cnt & 0x0FFFFFFF), (cnt >> 28)
             tup = ObjectCnt(
                 thread = int(th_str[th_str.find('th=') + len('th='):]),
                 cls = parts[1][len('class='):],
                 ptr = parts[2][len('ptr='):],
-                cnt = int(parts[3][len('cnt='):]),
+                cnt = cnt,
+                age = age,
                 length = (None if typ == 'object' else int(parts[-2][len('len='):])),
                 size = int(parts[-1][len('size='):]),
                 typ = typ)
@@ -149,7 +156,7 @@ def read_logs(logfile, last_n = None, verbose=False, reversed=False, generator=F
 
     if not generator:
         return snapshots
-    
+
 
 # logs/images saver
 
@@ -157,9 +164,11 @@ import matplotlib.backends.backend_pdf
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import pandas as pd
 
 def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, iteration=None, dynamic_bins_size=True):
     # Extract the access counts and sizes from the object counts
+    objects = list(objects)
     access_counts = np.array([obj.cnt for obj in objects])
     object_sizes = np.array([obj.size for obj in objects])
 
@@ -168,7 +177,18 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
 
     if dynamic_bins_size:
         # Calculate bin edges based on quantiles
-        bin_edges = np.percentile(access_counts, np.linspace(0, 100, num_bins + 1))
+        # lower_percentiles = np.linspace(0, 90, num_bins // 3 + 1)
+        # higher_percentiles = np.linspace(90, 100, num_bins - (num_bins // 3))
+        # bin_edges = np.percentile(access_counts, np.concatenate([lower_percentiles, higher_percentiles]))
+        # bin_edges = np.percentile(access_counts, np.linspace(0, 100, num_bins + 1))
+        _, bin_edges = pd.qcut(access_counts, q = num_bins, duplicates='drop', retbins=True)
+
+        mask = (access_counts > bin_edges[-2]) & (access_counts <= bin_edges[-1])
+        last_counts = access_counts[mask]
+
+        _, extra_bin_edges = pd.qcut(last_counts, q = num_bins, duplicates='drop', retbins=True)
+        bin_edges = list(bin_edges)[:-2] + list(extra_bin_edges)
+        num_bins = len(bin_edges) - 1
     else:
         bin_edges = np.histogram_bin_edges(access_counts, bins=num_bins)
 
@@ -177,7 +197,7 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
     total_object_counts = np.zeros(num_bins, dtype=int)
 
     for i in range(num_bins):
-        mask = (access_counts >= bin_edges[i]) & (access_counts < bin_edges[i + 1])
+        mask = (access_counts > bin_edges[i]) & (access_counts <= bin_edges[i + 1])
 
         total_sizes[i] = np.sum(object_sizes[mask])
         total_object_counts[i] = np.sum(mask)
@@ -194,8 +214,8 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
     plt.xlabel("Bins of Access Counts")
     if group_by_sizes: plt.ylabel("Size of Objects")
     else: plt.ylabel("Number of Objects")
-    plt.title("Histogram of Objects by Access Counts%s" % display_iteration)
-    plt.xticks(range(num_bins), [f"{int(bin_edges[i])}-{int(bin_edges[i + 1])}" for i in range(num_bins)])
+    plt.title("Histogram of Objects by Access Counts %s" % display_iteration)
+    plt.xticks(range(num_bins), [f"{int(bin_edges[i])}" for i in range(num_bins)])
     plt.grid(axis='y')
     plt.yscale('log')
 
@@ -209,7 +229,7 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
         plt.show()
 
     # Display the total number/size for each bin
-    text_output = "Total stats for each Bin %s:\n" % display_iteration
+    text_output = "Total stats for each bin %s:\n" % display_iteration
     text_output += f"Number of objects: ~{round(sum(total_object_counts)/1000, 2)} K\n"
     text_output += f"Size of objects: ~{round(sum(total_sizes)/(1024*1024), 2)} Mb\n"
     for i in range(num_bins):
@@ -217,6 +237,65 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
 
         
     if file:
+        plt.figure(figsize=(23, 6))
+        plt.text(0.1, 0.5, text_output, fontsize=12, ha='left', va='center')
+        plt.axis('off')
+
+        file.savefig(plt.gcf())
+        plt.close()
+
+    else:
+        print(text_output)
+
+    # Step 4: Calculate proportion of objects with different ages in each bin
+    ages = np.array([obj.age for obj in objects])
+    age_groups = np.unique([obj.age for obj in objects])
+    age_proportions = np.zeros((num_bins, len(age_groups)))
+
+    for i in range(num_bins):
+        # Calculate mask for each bin
+        mask = (access_counts > bin_edges[i]) & (access_counts <= bin_edges[i + 1])
+
+        # Apply mask to filter objects
+        bin_ages = ages[mask]
+        total_objects_in_bin = total_object_counts[i]  # Count of objects in this specific bin
+
+        for j, age in enumerate(age_groups):
+            age_count = np.sum(bin_ages == age)
+            age_proportions[i, j] = (age_count / total_objects_in_bin) if total_objects_in_bin else 0
+
+    # Step 5: Display the histogram with proportions of objects in age groups
+    plt.figure(figsize=(23, 6))  # Adjust figure size as needed
+    colors = plt.cm.get_cmap('tab20', len(age_groups))  # Choose a colormap
+
+    bottom = np.zeros(num_bins)
+
+    for j in range(len(age_groups)):
+        plt.bar(range(num_bins), age_proportions[:, j], width=0.8, align='center', label=f'Age: {age_groups[j]}', color=colors(j), bottom=bottom)
+        bottom += age_proportions[:, j]
+
+    plt.xlabel("Bins of Access Counts")
+    plt.ylabel("Proportion of Objects by Age Group")
+    plt.title("Histogram of Objects by Access Counts %s" % display_iteration)
+    plt.xticks(range(num_bins), [f"{int(bin_edges[i])}" for i in range(num_bins)])
+    plt.grid(axis='y')
+    plt.legend()
+
+    if file:
+        file.savefig(plt.gcf())
+        plt.close()
+    else:
+        plt.show()
+
+    # Print age proportions for each bin
+    text_output = "Age proportions for each bin %s:\n" % display_iteration
+    for i in range(num_bins):
+        ages = [(age, round(age_proportions[i, j] * 100, 2)) for j, age in enumerate(age_groups) if age_proportions[i, j] != 0]
+        ages.sort(key=lambda x: x[1], reverse=True)
+        text_output += f"Bin {int(bin_edges[i])}-{int(bin_edges[i + 1])}, Age-Proportions: {ages}\n"
+
+    if file:
+        plt.figure(figsize=(23, 6))
         plt.text(0.1, 0.5, text_output, fontsize=12, ha='left', va='center')
         plt.axis('off')
 
@@ -287,7 +366,7 @@ def file_is_dump(file):
     return os.path.getsize(file) > 100
 
 
-def run_iteration(iter=0, run_benchmark=True, cleanup=True, last_n=100, dump_period=10, benchmark='luindex', copy_files=True, analyze_dumps=True):
+def run_iteration(iter=0, run_benchmark=True, cleanup=True, last_n=100, dump_period=10, benchmark='luindex', copy_files=True):
     print(cur_timestamp(), 'Running iteration #{} with args={}'.format(iter, locals()))
 
     # cleanup
@@ -338,24 +417,22 @@ def run_iteration(iter=0, run_benchmark=True, cleanup=True, last_n=100, dump_per
     print(cur_timestamp(), 'Got {} files: {}'.format(len(copied_dump_files), copied_dump_files))
 
     # analyze dumps
-    if analyze_dumps:
-        print(cur_timestamp(), 'Processing and storing %d dumps' % len(copied_dump_files))
-        if copied_dump_files:
-            for dump_file in copied_dump_files:
-                process_store_dump(dump_file, last_n=last_n)
+    print(cur_timestamp(), 'Processing and storing %d dumps' % len(copied_dump_files))
+    if copied_dump_files:
+        for dump_file in copied_dump_files:
+            process_store_dump(dump_file, last_n=last_n)
 
     print()
 
 
-def run_workflow(benchmark='sunflow', num=15, **kwargs):
+def run_workflow(benchmark='sunflow', num=15, copy_files=True, dump_period=5, last_n=100):
     for iter in range(num):
         try:
-            run_iteration(iter, benchmark=benchmark, **kwargs)
+            run_iteration(iter, last_n=last_n, dump_period=dump_period, benchmark=benchmark, copy_files=copy_files)
         except Exception as ex:
             print('Iteration failed with', ex)
 
 
-def copy_produced_pdfs(benchmarks, outdir=)
 if __name__ == '__main__':
     # file = '/home/savitar/research_jvm/results/h2/run1/dump_filel4cjsR'
     # for snap in read_logs(file, last_n=2, verbose=True, generator=True, reversed=True):
@@ -366,4 +443,4 @@ if __name__ == '__main__':
     # print(count_number_of_dumps(file))
 
     # run_iteration(benchmark='sunflow', iter=0, copy_files=False)
-    run_workflow(benchmark='h2', num=5, last_n=100, copy_files=False)
+    run_workflow(benchmark='h2', num=2, last_n=100, dump_period=10)
