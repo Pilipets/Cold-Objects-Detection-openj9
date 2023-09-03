@@ -33,4 +33,9 @@ Did the snapshot dumps if the timing between two GC cycles is more than 5 second
 PDF results can be viewed at https://github.com/Pilipets/Pilipets-Cold-Objects-Detection-openj9/blob/master/results/final_results/h2_no_decay.pdf
 
 ## TODO:
-Look for the todo.txt of the repo.
+Look for the TODO.md of the repo for the details and thoughts regarding the steps below.
+
+- Add more representative workloads;
+- Define object decay/coldness metric formula;
+- Implement the logic for JIT;
+- Measure performance overhead;
