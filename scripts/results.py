@@ -163,6 +163,7 @@ def read_logs(logfile, last_n = None, verbose=False, reversed=False, generator=T
 import matplotlib.backends.backend_pdf
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import os
 import pandas as pd
 from math import floor
@@ -247,14 +248,13 @@ def print_size_count_bins(file, original_objects, access_counts, object_sizes, b
     text_output += f"Number of non-array objects: ~{round(sum(total_object_counts), 2)} K, Total: ~{round(total_object_count, 2)} K\n"
     text_output += f"Size of non-array objects: ~{round(sum(total_sizes)/1024.0, 2)} Mb, Total: ~{round(total_object_size, 2)} Mb\n"
     for i in range(num_bins):
-        text_output += f"Bin ({floor(bin_edges[i])}, {floor(bin_edges[i + 1])}]: {round(total_object_counts[i], 2)}K objects, {round(total_sizes[i], 2)} Kb\n"
+        text_output += f"{i}. Bin ({floor(bin_edges[i])}, {floor(bin_edges[i + 1])}]: {round(total_object_counts[i], 2)}K objects, {round(total_sizes[i], 2)} Kb\n"
 
     plot_print_text(file, text_output)
 
 
-def print_age_bins(file, objects, access_counts, bin_edges, num_bins, display_iteration):
-    ages = np.array([obj.age for obj in objects])
-    age_groups = np.unique([obj.age for obj in objects])
+def print_age_bins(file, ages, access_counts, bin_edges, num_bins, display_iteration):
+    age_groups = np.unique(ages)
     age_proportions = np.zeros((num_bins, len(age_groups)))
 
 
@@ -296,44 +296,54 @@ def print_age_bins(file, objects, access_counts, bin_edges, num_bins, display_it
     for i in range(num_bins):
         ages = [(age, round(age_proportions[i, j] * 100, 2)) for j, age in enumerate(age_groups) if age_proportions[i, j] != 0]
         ages.sort(key=lambda x: x[1], reverse=True)
-        text_output += f"Bin ({floor(bin_edges[i])},{floor(bin_edges[i + 1])}], Age-Proportions: {ages}\n"
+        text_output += f"{i}. Bin ({floor(bin_edges[i])},{floor(bin_edges[i + 1])}], Age-Proportions: {ages}\n"
     
     plot_print_text(file, text_output)
 
 
-def print_cumulative_graph_bins(file, access_counts, object_sizes, bin_edges, num_bins, display_iteration):
+def print_cumulative_graph_bins(file, objects, access_counts, object_sizes, bin_edges, num_bins, display_iteration, multiple_ages=True):
     # Calculate the cumulative size for each unique access count
     unique_access_counts = np.unique(access_counts)
-    cumulative_sizes = []
-
-    for count in unique_access_counts:
-        mask = (access_counts <= count)
-        cumulative_sizes.append(round(np.sum(object_sizes[mask])/(1024.0*1024), 2))
-
-    total_size = sum(object_sizes)/(1024.0*1024.0)
+    total_size = sum(object_sizes)
 
     # Step 2: Display the cumulative sizes
-    plt.figure(figsize=(23, 6))  # Adjust figure size as needed
-    plt.plot(unique_access_counts, cumulative_sizes, marker='o')
+    plt.figure(figsize=(23, 10))  # Adjust figure size as needed
 
-    # Adding dots with dashes for specific bin_edges
+    age_edges = [0, 4, 9]
+    age_colors = cm.tab20(np.linspace(0, 1, len(age_edges)))
+    age_cumulative_sizes = {}
+    age_cumulatize_bin_sizes = {}
     print_edges = bin_edges[1:]
-    bin_sizes = []
-    for edge in print_edges:
-        # Calculate mask for each bin
-        mask = access_counts <= edge
-        bin_sizes.append(np.sum(object_sizes[mask]/(1024.0*1024.0)))
 
-    plt.plot(print_edges, [round(bin_size, 2) for bin_size in bin_sizes], 'o', color='red', label='Bin Edges with Dashes')
+    for i, age_label in enumerate(age_edges):
+        age_objects = [obj for obj in objects if obj.age >= age_label]
+        age_access_counts = np.array([obj.cnt for obj in age_objects])
+        age_object_sizes = np.array([obj.size for obj in age_objects])
+
+        age_cumulative_sizes[age_label] = []
+        for count in unique_access_counts:
+            mask = (age_access_counts <= count)
+            age_cumulative_sizes[age_label].append(round(np.sum(age_object_sizes[mask]) / (1024.0 * 1024), 2))
+
+        age_cumulatize_bin_sizes[age_label] = []
+        for edge in print_edges:
+            mask = (age_access_counts <= edge)
+            age_cumulatize_bin_sizes[age_label].append(np.sum(age_object_sizes[mask]))
+
+        # Plot cumulative sizes for each age group with an automatically generated color
+        plt.plot(unique_access_counts, age_cumulative_sizes[age_label], marker='o', label=f'Age {age_label}', color=age_colors[i])
+
+    # Adding dots with dashes for bin_edges
+    print_edges = bin_edges[1:]
     for edge in print_edges:
         plt.axvline(x=edge, color='red', linestyle='--')
 
-    plt.xlabel("Access Count")
+    plt.xlabel("Access Count, log")
     plt.ylabel("Cumulative Size of Objects, Mb")
     plt.title("Cumulative Size of Objects by Access Count%s" % display_iteration)
-    plt.grid()
+    plt.grid(axis='y')
     plt.xscale('log')
-    plt.show()
+    plt.legend()
 
     if file:
         file.savefig(plt.gcf())
@@ -344,19 +354,21 @@ def print_cumulative_graph_bins(file, access_counts, object_sizes, bin_edges, nu
     # Display the total size of objects for each access count
     text_output = "Cumulative Size for bins Access Counts %s:\n" % display_iteration
     for i in range(num_bins):
-        text_output += f"Bin (<{floor(bin_edges[i + 1])}]: {round(bin_sizes[i], 2)} Mb, {round(bin_sizes[i]*100.0/total_size, 2)}%\n"
+        age_bins = ", ".join("Age>={}({} Mb, {}%)".format(age, round(age_cumulatize_bin_sizes[age][i]/(1024.0*1024.0), 2), round(age_cumulatize_bin_sizes[age][i] * 100.0 / total_size, 2)) for age in age_edges)
+        text_output += f"{i}. Bin (<{floor(bin_edges[i + 1])}]: {age_bins}\n"
 
     plot_print_text(file, text_output)
 
 
-def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, iteration=None):
+def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, iteration=None, verbose=True):
     original_objects = objects
     # Extract the access counts and sizes from the object counts
     objects = list(obj for obj in objects if obj.typ != 'array')
     access_counts = np.array([obj.cnt for obj in objects])
     object_sizes = np.array([obj.size for obj in objects])
+    ages = np.array([obj.age for obj in objects])
 
-    # Step 1: Create bins to group the access counts automatically
+    if verbose: print(cur_timestamp(), 'Step 1: Create bins to group the access counts automatically')
     bin_edges = compute_bins(access_counts, num_bins=10)
     num_bins = len(bin_edges) - 1
 
@@ -365,14 +377,14 @@ def display_freq_bins(objects, group_by_sizes=True, file=None, init_file=None, i
     if init_file:
         file = matplotlib.backends.backend_pdf.PdfPages(init_file) # /tmp/output.pdf
 
-    # Step 2: print_size_count_bins
+    if verbose: print(cur_timestamp(), 'Step 2: print_size_count_bins')
     print_size_count_bins(file, original_objects, access_counts, object_sizes, bin_edges, num_bins, display_iteration)
 
-    # Step 3: print_age_bins
-    print_age_bins(file, objects, access_counts, bin_edges, num_bins, display_iteration)
+    if verbose: print(cur_timestamp(), 'Step 3: print_age_bins')
+    print_age_bins(file, ages, access_counts, bin_edges, num_bins, display_iteration)
 
-    # Step 4: print_cumulative_graph_bins
-    print_cumulative_graph_bins(file, access_counts, object_sizes, bin_edges, num_bins, display_iteration)
+    if verbose: print(cur_timestamp(), 'Step 4: print_cumulative_graph_bins')
+    print_cumulative_graph_bins(file, objects, access_counts, object_sizes, bin_edges, num_bins, display_iteration)
 
     if init_file:
         file.close()
@@ -391,7 +403,7 @@ def process_store_dump(file, last_n, reversed=False):
     pdf = matplotlib.backends.backend_pdf.PdfPages(new_file_path)
     for idx, snap in enumerate(read_logs(file, last_n=last_n, verbose=True, generator=True, reversed=reversed)):
         if reversed: idx = - (idx + 1)
-        display_freq_bins(snap, file=pdf, iteration=idx)
+        display_freq_bins(snap, file=pdf, iteration=idx, verbose=True)
     pdf.close()
     return snapshots
 
@@ -512,5 +524,5 @@ if __name__ == '__main__':
     # process_store_dump(file, last_n=100, reversed=False)
     # print(count_number_of_dumps(file))
 
-    # run_iteration(benchmark='sunflow', iter=0, copy_files=False)
-    run_workflow(benchmark='sunflow', num=2, dump_period=5)
+    run_iteration(benchmark='sunflow', iter=1)
+    # run_workflow(benchmark='h2', num=2, dump_period=5)
