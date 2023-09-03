@@ -30,5 +30,7 @@ There are 3 types of graphs:
 Access count bin selection is the following - take 10 percentiles of the access count distribution, then split the last bin to take 10 more percentiles.\
 Did the snapshot dumps if the timing between two GC cycles is more than 5 seconds or more than 5 GC cycles passed.
 
+PDF results can be viewed at https://github.com/Pilipets/Pilipets-Cold-Objects-Detection-openj9/blob/master/results/final_results/h2_no_decay.pdf
+
 ## TODO:
 Look for the todo.txt of the repo.
