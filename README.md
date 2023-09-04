@@ -1,4 +1,4 @@
-# Pilipets-Cold-Objects-Detection-openj9
+# Cold-Objects-Detection-openj9
 
 The long-term goal of this project is to reduce the memory cost of running Java applications in consolidated cloud environments.\
 The current project goal is identifying "cold" (rarely accessed) objects and/or memory ranges in the JVM heap ("temperature measurement").
